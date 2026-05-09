@@ -1,1 +1,21 @@
 .env
+chat_log.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+
+# Virtual env
+venv/
+.venv/
