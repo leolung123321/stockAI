@@ -13,6 +13,12 @@ def format_analysis(
     name = stock_data.get("name", symbol)
 
     lines: List[str] = []
+    # ── 數據來源標示 ──
+    data_source = stock_data.get("data_source", "")
+    if "富途" in data_source:
+        lines.append(f"📡 **數據來自富途即時行情**")
+    lines.append("")
+
     # ── 標題 ──
     lines.append(f"## {name} ({symbol}) — 技術分析 💹")
     lines.append("")

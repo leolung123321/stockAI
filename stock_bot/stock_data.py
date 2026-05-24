@@ -1,10 +1,14 @@
 """
-stock_data.py - 使用 yfinance 獲取完整股價數據、多層級支撐阻力位、技術指標
+stock_data.py - 使用富途 OpenD 即時行情 + yfinance 備援，完整股價數據、多層級支撐阻力位、技術指標
+數據源策略：富途優先 → yfinance fallback
 """
 import yfinance as yf
 import numpy as np
+import pandas as pd
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+
+from .futu_client import get_futu
 
 
 def _safe_val(val: Any) -> float | None:
@@ -52,7 +56,113 @@ def _safe_series_max(series, tail: int = 20) -> float | None:
 
 
 def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
-    """獲取股票完整技術分析數據。"""
+    """
+    獲取股票完整技術分析數據。
+
+    數據源策略：富途 OpenD 即時行情優先 → yfinance 備援
+    """
+    # ── 嘗試富途即時行情 ──
+    futu_result = _get_futu_data(symbol)
+    if futu_result is not None:
+        print(f"[stock_data] 富途即時行情成功: {symbol}")
+        return futu_result
+
+    # ── Fallback: 原有 yfinance 邏輯 ──
+    print(f"[stock_data] 富途不可用，轉為 yfinance fallback: {symbol}")
+    return _get_yfinance_data(symbol)
+
+
+def _get_futu_data(symbol: str) -> Optional[Dict[str, Any]]:
+    """使用富途 OpenD 取得即時行情 + K 線技術分析。富途不通回傳 None。"""
+    futu = get_futu()
+    if not futu or not futu.is_connected:
+        return None
+
+    # 1) 即時報價
+    quote = futu.get_realtime_quote(symbol)
+    if quote is None:
+        return None
+
+    current_price = quote["current_price"]
+    prev_close = quote.get("prev_close")
+    open_price = quote.get("open_price")
+    day_high = quote.get("day_high")
+    day_low = quote.get("day_low")
+    volume = quote.get("volume", 0)
+    change = quote.get("change")
+    change_percent = quote.get("change_percent")
+    direction = quote.get("direction")
+    name = symbol  # 富途報價有 name 欄位，但 get_market_snapshot 未必有，先用 symbol
+
+    # 2) 日 K 線 → 技術指標計算
+    hist = futu.get_kline(symbol, ktype="K_DAY", num=100)
+    hist_5d = futu.get_kline(symbol, ktype="K_DAY", num=5)
+    hist_1mo = futu.get_kline(symbol, ktype="K_DAY", num=30)
+
+    # 若 K 線全失敗，仍可回傳基本的即時報價（無 TA）
+    if hist is not None and len(hist) > 0:
+        bollinger_upper, bollinger_mid, bollinger_lower = _calc_bollinger(hist, current_price)
+        support_levels = _calc_support_levels(current_price, day_low or 0, bollinger_lower, 0, hist)
+        resistance_levels = _calc_resistance_levels(current_price, day_high or 0, bollinger_upper, 0, hist)
+        td_sequential = _calc_td_sequential(hist)
+    else:
+        bollinger_upper = round(current_price * 1.05, 2)
+        bollinger_mid = round(current_price, 2)
+        bollinger_lower = round(current_price * 0.95, 2)
+        support_levels = _calc_support_levels(current_price, day_low or 0, bollinger_lower, 0, None)
+        resistance_levels = _calc_resistance_levels(current_price, day_high or 0, bollinger_upper, 0, None)
+        td_sequential = None
+
+    # 3) 分時九轉（用富途 K 線）
+    td_intraday = {}
+    for lbl, kt in [("1m", "K_1M"), ("5m", "K_5M"), ("15m", "K_15M")]:
+        try:
+            k = futu.get_kline(symbol, ktype=kt, num=100)
+            td_intraday[lbl] = _calc_td_sequential(k) if k is not None else None
+        except Exception:
+            td_intraday[lbl] = None
+
+    # 4) yfinance 補充基本資料（PE、市值、分析師目標、52週高低）
+    yf_extra = _get_yfinance_basic_info(symbol)
+
+    # 5) 組合結果
+    result = {
+        "symbol": symbol,
+        "data_source": "富途即時行情 (OpenD)",
+        "name": yf_extra.get("name", symbol),
+        "current_price": round(current_price, 2),
+        "prev_close": round(prev_close, 2) if prev_close is not None else None,
+        "open_price": round(open_price, 2) if open_price is not None else None,
+        "day_high": round(day_high, 2) if day_high is not None else None,
+        "day_low": round(day_low, 2) if day_low is not None else None,
+        "change": round(change, 2) if change is not None else None,
+        "change_percent": round(change_percent, 2) if change_percent is not None else None,
+        "direction": direction,
+        "week52_high": yf_extra.get("week52_high"),
+        "week52_low": yf_extra.get("week52_low"),
+        "pe_ratio": yf_extra.get("pe_ratio"),
+        "market_cap": yf_extra.get("market_cap"),
+        "analyst_target_mean": yf_extra.get("analyst_target_mean"),
+        "analyst_target_low": yf_extra.get("analyst_target_low"),
+        "analyst_target_high": yf_extra.get("analyst_target_high"),
+        "analyst_target_median": yf_extra.get("analyst_target_median"),
+        "analyst_count": yf_extra.get("analyst_count"),
+        "earnings_date": yf_extra.get("earnings_date"),
+        "volume": volume,
+        "avg_volume_10d": int(hist_1mo["Volume"].dropna().tail(10).mean()) if hist_1mo is not None and not hist_1mo.empty and hist_1mo["Volume"].dropna().size >= 5 else volume,
+        "bollinger_upper": bollinger_upper,
+        "bollinger_mid": bollinger_mid,
+        "bollinger_lower": bollinger_lower,
+        "support_levels": support_levels,
+        "resistance_levels": resistance_levels,
+        "td_sequential": td_sequential,
+        "td_intraday": td_intraday,
+    }
+    return result
+
+
+def _get_yfinance_data(symbol: str) -> Optional[Dict[str, Any]]:
+    """原有 yfinance 完整邏輯（完全保留）。"""
     try:
         ticker = yf.Ticker(symbol)
         info = ticker.info or {}
@@ -74,8 +184,6 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
             prev_close = _safe_val(hist_5d["Close"].iloc[-2])
         if prev_close is None and len(hist_1mo) >= 2:
             prev_close = _safe_val(hist_1mo["Close"].iloc[-2])
-        # 若 prev_close 仍是 None，則所有相關計算都回傳 None
-        # （不硬塞預設值 100.0，避免虛報）
 
         # ── 現價 ──
         current_price = _safe_val(fast.get("last_price")) or _safe_val(fast.get("regular_market_previous_close"))
@@ -149,17 +257,7 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
 
         # ── 布林帶（20 日） ──
         hist = ticker.history(period="3mo")
-        if len(hist) > 0:
-            closes_raw = hist["Close"].dropna().values[-20:]
-        else:
-            closes_raw = np.array([])
-        closes = closes_raw if len(closes_raw) >= 5 else np.array([current_price] * 20)
-
-        sma_20 = float(np.mean(closes))
-        std_20 = float(np.std(closes, ddof=1)) if len(closes) > 1 else 0.0
-        bollinger_upper = round(sma_20 + 2 * std_20, 2)
-        bollinger_mid = round(sma_20, 2)
-        bollinger_lower = round(sma_20 - 2 * std_20, 2)
+        bollinger_upper, bollinger_mid, bollinger_lower = _calc_bollinger(hist, current_price)
 
         # ── 多層級支撐/阻力位 ──
         support_levels = _calc_support_levels(current_price, day_low, bollinger_lower, week52_low, hist)
@@ -173,6 +271,7 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
 
         return {
             "symbol": symbol,
+            "data_source": "yfinance (延遲約15-20分鐘)",
             "name": name,
             "current_price": round(current_price, 2),
             "prev_close": round(prev_close, 2) if prev_close is not None else None,
@@ -204,8 +303,66 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
         }
 
     except Exception as e:
-        print(f"[stock_data] 獲取 {symbol} 數據失敗: {e}")
+        print(f"[stock_data] yfinance 獲取 {symbol} 數據失敗: {e}")
         return None
+
+
+def _get_yfinance_basic_info(symbol: str) -> Dict[str, Any]:
+    """僅從 yfinance 取得基本資料（PE、市值、分析師目標、52週高低等），不拉 K 線。"""
+    out: Dict[str, Any] = {
+        "name": symbol, "week52_high": None, "week52_low": None,
+        "pe_ratio": None, "market_cap": None,
+        "analyst_target_mean": None, "analyst_target_low": None,
+        "analyst_target_high": None, "analyst_target_median": None,
+        "analyst_count": None, "earnings_date": None,
+    }
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        fast = ticker.fast_info or {}
+
+        out["name"] = info.get("long_name") or info.get("short_name") or symbol
+        out["week52_high"] = _safe_val(fast.get("year_high")) or _safe_val(info.get("fiftyTwoWeekHigh"))
+        out["week52_low"] = _safe_val(fast.get("year_low")) or _safe_val(info.get("fiftyTwoWeekLow"))
+        out["pe_ratio"] = info.get("trailingPE") or info.get("forwardPE") or None
+        out["market_cap"] = info.get("marketCap") or None
+        out["analyst_target_mean"] = info.get("targetMeanPrice") or None
+        out["analyst_target_low"] = info.get("targetLowPrice") or None
+        out["analyst_target_high"] = info.get("targetHighPrice") or None
+        out["analyst_target_median"] = info.get("targetMedianPrice") or None
+        out["analyst_count"] = int(info["numberOfAnalystOpinions"]) if info.get("numberOfAnalystOpinions") else None
+
+        ed = info.get("earningsDate")
+        if isinstance(ed, list) and ed:
+            out["earnings_date"] = ed[0]
+        elif isinstance(ed, (int, float)):
+            out["earnings_date"] = datetime.fromtimestamp(ed).strftime("%Y-%m-%d")
+
+        # 整理為 round / None
+        for k in ["week52_high", "week52_low", "analyst_target_mean", "analyst_target_low", "analyst_target_high", "analyst_target_median"]:
+            v = out.get(k)
+            if v is not None:
+                out[k] = round(float(v), 2)
+    except Exception as e:
+        print(f"[stock_data] yfinance 基本資訊補充失敗: {e}")
+
+    return out
+
+
+def _calc_bollinger(hist: Any, fallback_price: float) -> tuple:
+    """計算布林帶（20日）。"""
+    if hist is not None and len(hist) > 0:
+        closes_raw = hist["Close"].dropna().values[-20:]
+    else:
+        closes_raw = np.array([])
+    closes = closes_raw if len(closes_raw) >= 5 else np.array([fallback_price] * 20)
+
+    sma_20 = float(np.mean(closes))
+    std_20 = float(np.std(closes, ddof=1)) if len(closes) > 1 else 0.0
+    upper = round(sma_20 + 2 * std_20, 2)
+    mid = round(sma_20, 2)
+    lower = round(sma_20 - 2 * std_20, 2)
+    return upper, mid, lower
 
 
 def _calc_support_levels(
@@ -469,7 +626,12 @@ def _merge_nearby_levels(levels: List[Dict[str, Any]], min_gap_pct: float = 2.0)
                 return v
         return 0
 
-    sorted_levels = sorted(levels, key=lambda x: x["price"])
+    # 過濾無效價格
+    valid = [lv for lv in levels if lv.get("price") is not None and lv["price"] > 0]
+    if not valid:
+        return []
+
+    sorted_levels = sorted(valid, key=lambda x: x["price"])
     merged: List[Dict[str, Any]] = []
 
     for lv in sorted_levels:
@@ -478,7 +640,8 @@ def _merge_nearby_levels(levels: List[Dict[str, Any]], min_gap_pct: float = 2.0)
             continue
 
         last = merged[-1]
-        gap_pct = abs(lv["price"] - last["price"]) / last["price"] * 100
+        denom = last["price"]
+        gap_pct = abs(lv["price"] - denom) / denom * 100 if denom > 0 else 999
 
         if gap_pct < min_gap_pct:
             p_last = _priority_of(last)
