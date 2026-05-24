@@ -13,6 +13,7 @@ from .news_fetcher import get_recent_news
 from .sentiment import analyze_sentiment, parse_stock_symbol
 from .formatter import format_analysis, format_error, format_processing
 from .db import insert_log, init_db
+import yfinance as yf
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -186,8 +187,11 @@ async def run_analysis(
 
     stock_data, headlines = await asyncio.gather(stock_task, news_task)
 
-    # 檢查股價數據
+    # 檢查股價數據，失敗時嘗試建議修正代號
     if stock_data is None:
+        suggestion = _try_suggest_symbol(symbol)
+        if suggestion:
+            return format_error(symbol, f"無法獲取股價數據，你想查的是 {suggestion} 嗎？")
         return format_error(symbol, "無法獲取股價數據，請確認代號是否正確")
 
     # 情緒分析
@@ -207,6 +211,43 @@ async def run_analysis(
 
 
 # ────────────────────────── Bot 啟動 ──────────────────────────
+
+def _try_suggest_symbol(symbol: str) -> Optional[str]:
+    """當原始代號找不到時，嘗試補充常見後綴。"""
+    import re
+
+    # 已經有後綴的，不處理
+    if "." in symbol:
+        return None
+
+    # 嘗試常見後綴
+    candidates = []
+    if symbol.isdigit() and len(symbol) <= 5:
+        # 港股/台股/日股純數字 → 嘗試補 .HK / .TW / .T
+        code_padded = symbol.zfill(4)
+        candidates = [f"{code_padded}.HK", f"{code_padded}.TW", f"{code_padded}.T"]
+    elif symbol.isalpha() and len(symbol) <= 5:
+        candidates = [symbol]  # 美股不需後綴，原樣試一次
+    else:
+        candidates = [f"{symbol}.HK", f"{symbol}.TW", f"{symbol}.T", symbol]
+
+    for candidate in candidates[:5]:
+        try:
+            ticker = yf.Ticker(candidate)
+            info = ticker.info or {}
+            fast = ticker.fast_info or {}
+
+            # 多層 fallback 檢查是否有有效價格
+            price = fast.get("last_price") or fast.get("regular_market_previous_close")
+            if (price is None or (isinstance(price, float) and price <= 0)):
+                price = info.get("previousClose") or info.get("regularMarketPreviousClose") or info.get("currentPrice")
+            if price is not None and float(price) > 0:
+                return candidate
+        except Exception:
+            continue
+
+    return None
+
 
 def run_bot(token: str) -> None:
     """

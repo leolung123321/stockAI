@@ -74,8 +74,8 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
             prev_close = _safe_val(hist_5d["Close"].iloc[-2])
         if prev_close is None and len(hist_1mo) >= 2:
             prev_close = _safe_val(hist_1mo["Close"].iloc[-2])
-        if prev_close is None:
-            prev_close = 100.0
+        # 若 prev_close 仍是 None，則所有相關計算都回傳 None
+        # （不硬塞預設值 100.0，避免虛報）
 
         # ── 現價 ──
         current_price = _safe_val(fast.get("last_price")) or _safe_val(fast.get("regular_market_previous_close"))
@@ -85,8 +85,11 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
             current_price = _safe_val(hist_5d["Close"].iloc[-1])
         if current_price is None and not hist_1mo.empty:
             current_price = _safe_val(hist_1mo["Close"].iloc[-1])
-        if current_price is None:
+        if current_price is None and prev_close is not None:
             current_price = prev_close
+        if current_price is None:
+            print(f"[stock_data] 無法取得 {symbol} 的現價及前收市價，放棄處理")
+            return None
         current_price = float(current_price)
 
         # ── 開市價 ──
@@ -110,10 +113,10 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
         if day_low is None:
             day_low = current_price
 
-        change = current_price - prev_close
-        change_percent = (change / prev_close) * 100 if prev_close != 0 else 0.0
+        change = (current_price - prev_close) if prev_close is not None else None
+        change_percent = ((change / prev_close) * 100) if (prev_close is not None and prev_close != 0 and change is not None) else None
 
-        direction = "up" if change > 0 else ("down" if change < 0 else "flat")
+        direction = "up" if change is not None and change > 0 else ("down" if change is not None and change < 0 else ("flat" if change is not None else None))
         name = info.get("long_name") or info.get("short_name") or symbol
 
         # ── 52 週高低 ──
@@ -128,6 +131,8 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
         analyst_target_mean = info.get("targetMeanPrice") or None
         analyst_target_low = info.get("targetLowPrice") or None
         analyst_target_high = info.get("targetHighPrice") or None
+        analyst_target_median = info.get("targetMedianPrice") or None
+        analyst_count = info.get("numberOfAnalystOpinions") or None
 
         # ── 業績日期 ──
         earnings_date = None
@@ -144,10 +149,8 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
 
         # ── 布林帶（20 日） ──
         hist = ticker.history(period="3mo")
-        if len(hist) >= 20:
+        if len(hist) > 0:
             closes_raw = hist["Close"].dropna().values[-20:]
-        elif len(hist) > 0:
-            closes_raw = hist["Close"].dropna().values
         else:
             closes_raw = np.array([])
         closes = closes_raw if len(closes_raw) >= 5 else np.array([current_price] * 20)
@@ -162,16 +165,19 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
         support_levels = _calc_support_levels(current_price, day_low, bollinger_lower, week52_low, hist)
         resistance_levels = _calc_resistance_levels(current_price, day_high, bollinger_upper, week52_high, hist)
 
+        # ── TD Sequential（神奇九轉） ──
+        td_sequential = _calc_td_sequential(hist)
+
         return {
             "symbol": symbol,
             "name": name,
             "current_price": round(current_price, 2),
-            "prev_close": round(prev_close, 2),
+            "prev_close": round(prev_close, 2) if prev_close is not None else None,
             "open_price": round(open_price, 2),
             "day_high": round(day_high, 2),
             "day_low": round(day_low, 2),
-            "change": round(change, 2),
-            "change_percent": round(change_percent, 2),
+            "change": round(change, 2) if change is not None else None,
+            "change_percent": round(change_percent, 2) if change_percent is not None else None,
             "direction": direction,
             "week52_high": round(week52_high, 2),
             "week52_low": round(week52_low, 2),
@@ -180,6 +186,8 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
             "analyst_target_mean": round(analyst_target_mean, 2) if analyst_target_mean else None,
             "analyst_target_low": round(analyst_target_low, 2) if analyst_target_low else None,
             "analyst_target_high": round(analyst_target_high, 2) if analyst_target_high else None,
+            "analyst_target_median": round(analyst_target_median, 2) if analyst_target_median else None,
+            "analyst_count": int(analyst_count) if analyst_count else None,
             "earnings_date": earnings_date,
             "volume": volume,
             "avg_volume_10d": avg_volume_10d,
@@ -188,6 +196,7 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
             "bollinger_lower": bollinger_lower,
             "support_levels": support_levels,
             "resistance_levels": resistance_levels,
+            "td_sequential": td_sequential,
         }
 
     except Exception as e:
@@ -303,6 +312,114 @@ def _calc_resistance_levels(
         merged.append({"price": round(current * 1.07, 2), "level": "🔴 推算阻力", "description": "基於現價推算"})
     merged.sort(key=lambda x: x["price"])
     return merged
+
+
+def _calc_td_sequential(hist: Any) -> Optional[Dict[str, Any]]:
+    """
+    TD Sequential（神奇九轉）Setup 階段計算。
+    需要至少 60 根 K 線（取 6mo 歷史）以進行可靠計算。
+
+    Returns:
+        dict: {
+            "count": int,          # 當前 Setup 計數 (1-9)
+            "direction": str,      # "buy_setup" / "sell_setup"
+            "label": str,          # 中文描述
+            "bar_index": int,      # 從尾部算起的 bar 位置（0=最新）
+            "completed": bool,     # 是否已完成 9 轉
+            "signal": str,         # 交易信號
+        }
+        若數據不足則回傳 None
+    """
+    if hist is None or len(hist) < 30:
+        return None
+
+    closes = hist["Close"].dropna()
+    if len(closes) < 30:
+        return None
+
+    closes = closes.tail(100)  # 取最近 100 根
+    n = len(closes)
+
+    # ── Buy Setup（上升趨勢反轉向下）：連續 9 根收盤 > 4 根前收盤 ──
+    buy_setup_count = 0
+    buy_setup_bars: List[int] = []
+    for i in range(4, n):
+        close_i = float(closes.iloc[i])
+        close_4ago = float(closes.iloc[i - 4])
+        if close_i > close_4ago:
+            buy_setup_count += 1
+            buy_setup_bars.append(i)
+            if buy_setup_count >= 9:
+                break
+        else:
+            # 中斷則重置（需連續）
+            buy_setup_count = 0
+            buy_setup_bars = []
+
+    # ── Sell Setup（下跌趨勢反轉向上）：連續 9 根收盤 < 4 根前收盤 ──
+    sell_setup_count = 0
+    sell_setup_bars: List[int] = []
+    for i in range(4, n):
+        close_i = float(closes.iloc[i])
+        close_4ago = float(closes.iloc[i - 4])
+        if close_i < close_4ago:
+            sell_setup_count += 1
+            sell_setup_bars.append(i)
+            if sell_setup_count >= 9:
+                break
+        else:
+            sell_setup_count = 0
+            sell_setup_bars = []
+
+    # 決定當前有效的 Setup（取最近完成的或正在計數的）
+    latest_buy_bar = buy_setup_bars[-1] if buy_setup_bars else -1
+    latest_sell_bar = sell_setup_bars[-1] if sell_setup_bars else -1
+
+    if latest_buy_bar > latest_sell_bar and buy_setup_count > 0:
+        # 買入結構（上升趨勢中，預示可能反轉向下 → 賣出信號）
+        completed = buy_setup_count >= 9
+        latest_bar = buy_setup_bars[-1]
+        bars_from_end = n - 1 - latest_bar
+
+        if completed:
+            signal = "⚠️ 9轉完成，上升趨勢可能衰竭，留意回調風險"
+            label = f"🟡 賣出Setup 第{buy_setup_count}轉（已完成）"
+        else:
+            signal = f"上升趨勢中，目前第{buy_setup_count}轉，距9轉尚餘{9 - buy_setup_count}根"
+            label = f"🟡 賣出Setup 第{buy_setup_count}/9轉"
+
+        return {
+            "count": buy_setup_count,
+            "direction": "sell_setup",
+            "label": label,
+            "bars_from_end": bars_from_end,
+            "completed": completed,
+            "signal": signal,
+        }
+
+    elif latest_sell_bar > latest_buy_bar and sell_setup_count > 0:
+        # 賣出結構（下跌趨勢中，預示可能反轉向上 → 買入信號）
+        completed = sell_setup_count >= 9
+        latest_bar = sell_setup_bars[-1]
+        bars_from_end = n - 1 - latest_bar
+
+        if completed:
+            signal = "✅ 9轉完成，下跌趨勢可能衰竭，留意反彈機會"
+            label = f"🟢 買入Setup 第{sell_setup_count}轉（已完成）"
+        else:
+            signal = f"下跌趨勢中，目前第{sell_setup_count}轉，距9轉尚餘{9 - sell_setup_count}根"
+            label = f"🟢 買入Setup 第{sell_setup_count}/9轉"
+
+        return {
+            "count": sell_setup_count,
+            "direction": "buy_setup",
+            "label": label,
+            "bars_from_end": bars_from_end,
+            "completed": completed,
+            "signal": signal,
+        }
+
+    return None
 
 
 def _merge_nearby_levels(levels: List[Dict[str, Any]], min_gap_pct: float = 2.0) -> List[Dict[str, Any]]:

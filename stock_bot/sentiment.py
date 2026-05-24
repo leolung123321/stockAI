@@ -74,7 +74,7 @@ def analyze_sentiment(headlines: List[str], symbol: str = "") -> Optional[Dict[s
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
-            max_tokens=800,
+            max_tokens=1500,
         )
 
         content = response.choices[0].message.content.strip()

@@ -46,12 +46,30 @@ def _format_price_section(d: Dict[str, Any]) -> List[str]:
     """最新股價區塊。"""
     lines = ["### 📈 最新股價"]
 
-    arrow = "▲" if d["direction"] == "up" else ("▼" if d["direction"] == "down" else "—")
+    # 若前收為 None，則相關欄位無法計算
+    if d.get("prev_close") is None:
+        lines.append(
+            f"**現報：${d['current_price']}**（前收市價數據不可用）"
+        )
+        lines.append("")
+        return lines
 
-    lines.append(
-        f"**前收：${d['prev_close']} → 開市：${d['open_price']} → 現報：${d['current_price']}"
-        f"（{arrow} {d['change']:+.2f} / {d['change_percent']:+.2f}%）**"
-    )
+    direction = d.get("direction")
+    change = d.get("change")
+    change_pct = d.get("change_percent")
+    prev_close = d["prev_close"]
+
+    arrow = "▲" if direction == "up" else ("▼" if direction == "down" else "—")
+
+    if change is not None and change_pct is not None:
+        lines.append(
+            f"**前收：${prev_close} → 開市：${d['open_price']} → 現報：${d['current_price']}"
+            f"（{arrow} {change:+.2f} / {change_pct:+.2f}%）**"
+        )
+    else:
+        lines.append(
+            f"**前收：${prev_close} → 開市：${d['open_price']} → 現報：${d['current_price']}**"
+        )
 
     if d["day_low"] != d["day_high"]:
         lines.append(f"今日波幅：${d['day_low']} - ${d['day_high']}")
@@ -99,7 +117,14 @@ def _format_indicators(d: Dict[str, Any]) -> List[str]:
     if target_mean:
         target_low = d.get("analyst_target_low") or "N/A"
         target_high = d.get("analyst_target_high") or "N/A"
-        lines.append(f"- **分析師目標價**：均價 **${target_mean}**（最低 ${target_low}，最高 ${target_high}）")
+        target_median = d.get("analyst_target_median")
+        analyst_count = d.get("analyst_count")
+
+        target_line = f"- **分析師目標價**（{analyst_count}位分析師）：均價 **${target_mean}**"
+        if target_median:
+            target_line += f" / 中位數 **${target_median}**"
+        target_line += f"（最低 ${target_low}，最高 ${target_high}）"
+        lines.append(target_line)
 
     earnings = d.get("earnings_date")
     if earnings:
@@ -122,6 +147,12 @@ def _format_indicators(d: Dict[str, Any]) -> List[str]:
     boll_mid = d["bollinger_mid"]
     boll_lower = d["bollinger_lower"]
     lines.append(f"- **20日布林帶**：上軌 ${boll_upper} / 中線 ${boll_mid} / 下軌 ${boll_lower}")
+
+    # ── TD Sequential（神奇九轉） ──
+    td = d.get("td_sequential")
+    if td:
+        lines.append(f"- **神奇九轉**：{td['label']}")
+        lines.append(f"  → {td['signal']}")
 
     market_cap = d.get("market_cap")
     if market_cap:

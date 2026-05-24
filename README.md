@@ -82,22 +82,22 @@ python main.py
 ```bash
 pip install pyinstaller
 
-pyinstaller --onefile --name StockAI ^
-  --hidden-import flask ^
-  --hidden-import yfinance ^
-  --hidden-import openai ^
-  --hidden-import telegram ^
-  --hidden-import telegram.ext ^
-  --hidden-import numpy ^
-  --hidden-import requests ^
-  --hidden-import dotenv ^
-  --hidden-import stock_bot.db ^
-  --hidden-import stock_bot.stock_data ^
-  --hidden-import stock_bot.news_fetcher ^
-  --hidden-import stock_bot.sentiment ^
-  --hidden-import stock_bot.formatter ^
-  --hidden-import stock_bot.bot ^
-  --hidden-import web_app ^
+pyinstaller --onefile --name StockAI `
+  --hidden-import flask `
+  --hidden-import yfinance `
+  --hidden-import openai `
+  --hidden-import telegram `
+  --hidden-import telegram.ext `
+  --hidden-import numpy `
+  --hidden-import requests `
+  --hidden-import dotenv `
+  --hidden-import stock_bot.db `
+  --hidden-import stock_bot.stock_data `
+  --hidden-import stock_bot.news_fetcher `
+  --hidden-import stock_bot.sentiment `
+  --hidden-import stock_bot.formatter `
+  --hidden-import stock_bot.bot `
+  --hidden-import web_app `
   main.py
 ```
 
