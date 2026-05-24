@@ -154,6 +154,22 @@ def _format_indicators(d: Dict[str, Any]) -> List[str]:
         lines.append(f"- **神奇九轉**：{td['label']}")
         lines.append(f"  → {td['signal']}")
 
+    # ── 分時九轉（1m / 5m / 15m） ──
+    td_intra = d.get("td_intraday")
+    if td_intra:
+        intra_labels = {
+            "1m": "1分鐘線",
+            "5m": "5分鐘線",
+            "15m": "15分鐘線",
+        }
+        for interval, label in intra_labels.items():
+            v = td_intra.get(interval)
+            if v:
+                lines.append(f"- **分時九轉（{label}）**：{v['label']}")
+                lines.append(f"  → {v['signal']}")
+            else:
+                lines.append(f"- **分時九轉（{label}）**：數據不足")
+
     market_cap = d.get("market_cap")
     if market_cap:
         if market_cap >= 1e12:

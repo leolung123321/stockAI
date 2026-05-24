@@ -168,6 +168,9 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
         # ── TD Sequential（神奇九轉） ──
         td_sequential = _calc_td_sequential(hist)
 
+        # ── 分時九轉（1m / 5m / 15m） ──
+        td_intraday = _calc_intraday_td_sequential(ticker)
+
         return {
             "symbol": symbol,
             "name": name,
@@ -197,6 +200,7 @@ def get_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
             "support_levels": support_levels,
             "resistance_levels": resistance_levels,
             "td_sequential": td_sequential,
+            "td_intraday": td_intraday,
         }
 
     except Exception as e:
@@ -324,7 +328,7 @@ def _calc_td_sequential(hist: Any) -> Optional[Dict[str, Any]]:
             "count": int,          # 當前 Setup 計數 (1-9)
             "direction": str,      # "buy_setup" / "sell_setup"
             "label": str,          # 中文描述
-            "bar_index": int,      # 從尾部算起的 bar 位置（0=最新）
+            "bars_from_end": int,  # 從尾部算起的 bar 位置（0=最新）
             "completed": bool,     # 是否已完成 9 轉
             "signal": str,         # 交易信號
         }
@@ -420,6 +424,36 @@ def _calc_td_sequential(hist: Any) -> Optional[Dict[str, Any]]:
         }
 
     return None
+
+
+def _calc_intraday_td_sequential(ticker: Any) -> Dict[str, Optional[Dict[str, Any]]]:
+    """
+    分時九轉：計算 1 分鐘、5 分鐘、15 分鐘 K 線嘅 TD Sequential。
+
+    Args:
+        ticker: yfinance Ticker 物件
+
+    Returns:
+        dict: {"1m": {...}, "5m": {...}, "15m": {...}}
+        每個值係 _calc_td_sequential() 嘅回傳格式，數據不足則為 None
+    """
+    intervals = [
+        ("1m", "7d"),
+        ("5m", "2mo"),
+        ("15m", "3mo"),
+    ]
+
+    result: Dict[str, Optional[Dict[str, Any]]] = {}
+    for label, period in intervals:
+        try:
+            hist = ticker.history(period=period, interval=label)
+            td = _calc_td_sequential(hist)
+            result[label] = td
+        except Exception as e:
+            print(f"[stock_data] 分時九轉 {label} 計算失敗: {e}")
+            result[label] = None
+
+    return result
 
 
 def _merge_nearby_levels(levels: List[Dict[str, Any]], min_gap_pct: float = 2.0) -> List[Dict[str, Any]]:
