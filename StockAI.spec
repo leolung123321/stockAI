@@ -27,7 +27,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=_futu_datas,
+    datas=_futu_datas + [("watchlist.json", ".")],
     hiddenimports=['flask', 'yfinance', 'openai', 'telegram', 'telegram.ext', 'numpy', 'requests', 'dotenv', 'webbrowser', 'futu', 'futu.common', 'futu.quote', 'futu.trade', 'futu.tools', 'stock_bot.db', 'stock_bot.stock_data', 'stock_bot.futu_client', 'stock_bot.news_fetcher', 'stock_bot.sentiment', 'stock_bot.formatter', 'stock_bot.bot', 'web_app'],
     hookspath=[],
     hooksconfig={},

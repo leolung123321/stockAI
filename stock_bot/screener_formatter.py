@@ -44,7 +44,8 @@ def format_screener_report(result: Dict[str, Any]) -> str:
             f"（**{h['change_pct']:+.2f}%**）"
         )
         lines.append(f"   實體：${h['body']} / ATR(14)：${h['atr']}（比值 {h['atr_ratio']:.2f}x）")
-        lines.append(f"   前 {len(h['prev_trading_dates'])} 日：無中大陽線 ✅")
+        prev_status = "有中大陽線 ⚠️" if h["prev_has_bullish"] else "無中大陽線 ✅"
+        lines.append(f"   前 {len(h['prev_trading_dates'])} 日：{prev_status}")
         lines.append(f"   📰 **驅動事件**：{h['driver']}")
         lines.append("")
 
@@ -104,7 +105,7 @@ def format_screener_html(result: Dict[str, Any]) -> str:
             f'</div>'
             f'<div class="screener-meta">'
             f'實體 ${h["body"]} / ATR ${h["atr"]} ({h["atr_ratio"]:.2f}x)'
-            f' · 前{len(h["prev_trading_dates"])}日無中大陽線 ✅'
+            f' · 前{len(h["prev_trading_dates"])}日{"有中大陽線 ⚠️" if h["prev_has_bullish"] else "無中大陽線 ✅"}'
             f'</div>'
             f'<div class="screener-driver">📰 {h["driver"]}</div>'
             f'</div>'

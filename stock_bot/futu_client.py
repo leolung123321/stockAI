@@ -1,6 +1,8 @@
 """
 futu_client.py - 富途 OpenD 即時行情封裝，yfinance 備援整合
 """
+import logging
+import socket
 import threading
 from typing import Optional, Dict, Any
 
@@ -105,8 +107,27 @@ class FutuClient:
         self._connected = False
 
     def connect(self) -> bool:
-        """連線 OpenD"""
+        """連線 OpenD（先 socket probe 再建立連線）"""
+        # precedence check: port 有無 listen
+        try:
+            s = socket.create_connection((self.host, self.port), timeout=2)
+            s.close()
+        except OSError:
+            print(f"[futu_client] OpenD {self.host}:{self.port} 未啟動，跳過 futu 連線")
+            self._connected = False
+            return False
+
         from futu import OpenQuoteContext, RET_OK
+        import futu
+
+        # 抑制 futu SDK 內部 ws error print
+        # FTLog 沒有 setLevel，改用 console_level / file_level 或 console_logger
+        if hasattr(futu.logger, "console_logger") and futu.logger.console_logger:
+            futu.logger.console_logger.setLevel(logging.WARNING)
+        if hasattr(futu.logger, "file_logger") and futu.logger.file_logger:
+            futu.logger.file_logger.setLevel(logging.WARNING)
+        futu.logger.console_level = logging.WARNING
+        futu.logger.file_level = logging.WARNING
 
         try:
             ctx = OpenQuoteContext(self.host, self.port)

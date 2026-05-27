@@ -5,6 +5,7 @@ screener.py - 龍頭股異動篩選器
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -19,17 +20,33 @@ from .futu_client import get_futu, _yf_to_futu
 ATR_PERIOD = 14
 ATR_MULTIPLIER = float(os.getenv("SCREENER_ATR_MULTIPLIER", "1.0"))
 # 中大陽線 = 實體 > ATR × this (default 1.0, 可在 .env 設 SCREENER_ATR_MULTIPLIER=1.2 微調)
-WATCHLIST_PATH = os.path.join(os.path.dirname(__file__), "..", "watchlist.json")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+
+
+def _get_watchlist_path() -> str:
+    """取得 watchlist.json 路徑（支援 PyInstaller 打包環境）。"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包：優先找 exe 同目錄（可讓用戶自行編輯），
+        # 找不到則用 _MEIPASS 內建的
+        base = os.path.dirname(sys.executable)
+        user_path = os.path.join(base, "watchlist.json")
+        if os.path.isfile(user_path):
+            return user_path
+        # fallback: 打包內建檔案
+        return os.path.join(sys._MEIPASS, "watchlist.json")
+    else:
+        # 一般 Python 腳本：watchlist.json 在專案根目錄
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "watchlist.json")
 
 
 def _load_watchlist() -> Dict[str, Any]:
     """載入龍頭股配置。"""
+    path = _get_watchlist_path()
     try:
-        with open(WATCHLIST_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"[screener] 載入 watchlist 失敗: {e}")
+        print(f"[screener] 載入 watchlist 失敗 ({path}): {e}")
         return {}
 
 
@@ -368,11 +385,9 @@ def run_screen(target_date: Optional[str] = None) -> Dict[str, Any]:
                     print(f"  [skip] {name} ({symbol}): 陰線/平盤 O=${o:.2f} C=${c:.2f}")
                 continue  # 不滿足中大陽線
 
-            # 取前3個交易日
+            # 取前3個交易日，檢查是否有中大陽線
             prev_dates = _get_prev_trading_dates(df, target_date, count=3)
-            if not _check_prev_no_bullish(symbol, df, prev_dates):
-                print(f"  [skip] {name} ({symbol}): 前3日有中大陽線")
-                continue  # 前3天有中大陽線，跳過
+            prev_has_bullish = not _check_prev_no_bullish(symbol, df, prev_dates)
 
             # 符合條件！
             change_pct = (c - o) / o * 100 if o > 0 else 0
@@ -404,6 +419,7 @@ def run_screen(target_date: Optional[str] = None) -> Dict[str, Any]:
                 "atr": round(atr, 2),
                 "atr_ratio": round(atr_ratio, 2),
                 "prev_trading_dates": prev_dates,
+                "prev_has_bullish": prev_has_bullish,
                 "headlines": headlines[:5],
                 "driver": driver,
                 "volume": day_ohlc.get("volume", 0),
