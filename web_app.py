@@ -2,8 +2,6 @@
 web_app.py - Flask Web 界面，顯示 Telegram Bot 查詢記錄
 """
 import os
-import webbrowser
-import threading
 from flask import Flask, request, jsonify
 
 from stock_bot.db import query_logs, get_log_count, init_db
@@ -143,8 +141,4 @@ def api_logs():
 def run_web(host: str = "127.0.0.1", port: int = 5000, open_browser: bool = True) -> None:
     """在獨立執行緒中啟動 Flask。"""
     init_db()
-
-    if open_browser:
-        threading.Timer(1.5, lambda: webbrowser.open(f"http://{host}:{port}")).start()
-
     app.run(host=host, port=port, debug=False, use_reloader=False)

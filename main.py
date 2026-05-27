@@ -4,6 +4,7 @@ main.py - StockAI 入口：啟動 Telegram Bot + Web Dashboard + 富途 OpenD �
 import os
 import sys
 import threading
+import webbrowser
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -54,6 +55,9 @@ if __name__ == "__main__":
         daemon=True,
     )
     web_thread.start()
+
+    # 延遲 2 秒等 Flask ready 後開啟瀏覽器
+    threading.Timer(2.0, lambda: webbrowser.open(f"http://{WEB_HOST}:{WEB_PORT}")).start()
 
     try:
         # Bot 在主執行緒中執行（asyncio event loop）
