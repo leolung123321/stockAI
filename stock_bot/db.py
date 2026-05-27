@@ -22,9 +22,15 @@ def init_db() -> None:
                 username TEXT,
                 symbol TEXT NOT NULL,
                 query TEXT,
-                result TEXT NOT NULL
+                result TEXT NOT NULL,
+                query_type TEXT DEFAULT 'analysis'
             )
         """)
+        # 向後兼容：舊表若無 query_type 欄位則新增
+        try:
+            conn.execute("ALTER TABLE chat_log ADD COLUMN query_type TEXT DEFAULT 'analysis'")
+        except sqlite3.OperationalError:
+            pass  # 欄位已存在
         conn.commit()
         conn.close()
 
@@ -35,13 +41,14 @@ def insert_log(
     symbol: str,
     query: str,
     result: str,
+    query_type: str = "analysis",
 ) -> None:
     """插入一筆查詢記錄。"""
     with _lock:
         conn = sqlite3.connect(DB_PATH)
         conn.execute(
-            "INSERT INTO chat_log (timestamp, user_id, username, symbol, query, result) VALUES (?, ?, ?, ?, ?, ?)",
-            (datetime.now().isoformat(), user_id, username, symbol, query, result),
+            "INSERT INTO chat_log (timestamp, user_id, username, symbol, query, result, query_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (datetime.now().isoformat(), user_id, username, symbol, query, result, query_type),
         )
         conn.commit()
         conn.close()

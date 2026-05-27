@@ -1,0 +1,65 @@
+{
+  "HK": {
+    "name": "港股",
+    "stocks": [
+      {"symbol": "0700.HK", "name": "騰訊控股", "sector": "科技"},
+      {"symbol": "9988.HK", "name": "阿里巴巴", "sector": "科技"},
+      {"symbol": "3690.HK", "name": "美團", "sector": "科技"},
+      {"symbol": "1810.HK", "name": "小米集團", "sector": "科技"},
+      {"symbol": "0992.HK", "name": "聯想集團", "sector": "科技"},
+      {"symbol": "9618.HK", "name": "京東集團", "sector": "科技"},
+      {"symbol": "1024.HK", "name": "快手", "sector": "科技"},
+      {"symbol": "9999.HK", "name": "網易", "sector": "科技"},
+      {"symbol": "9888.HK", "name": "百度集團", "sector": "科技"},
+      {"symbol": "1347.HK", "name": "華虹半導體", "sector": "半導體"},
+      {"symbol": "0522.HK", "name": "ASMPT", "sector": "半導體"},
+      {"symbol": "0981.HK", "name": "中芯國際", "sector": "半導體"},
+      {"symbol": "0005.HK", "name": "匯豐控股", "sector": "金融"},
+      {"symbol": "0388.HK", "name": "香港交易所", "sector": "金融"},
+      {"symbol": "1299.HK", "name": "友邦保險", "sector": "金融"},
+      {"symbol": "2318.HK", "name": "中國平安", "sector": "金融"},
+      {"symbol": "2388.HK", "name": "中銀香港", "sector": "金融"},
+      {"symbol": "0011.HK", "name": "恒生銀行", "sector": "金融"},
+      {"symbol": "0941.HK", "name": "中國移動", "sector": "電訊"},
+      {"symbol": "1211.HK", "name": "比亞迪股份", "sector": "汽車"},
+      {"symbol": "0016.HK", "name": "新鴻基地產", "sector": "地產"},
+      {"symbol": "0823.HK", "name": "領展房產基金", "sector": "地產"},
+      {"symbol": "1109.HK", "name": "華潤置地", "sector": "地產"}
+    ]
+  },
+  "US": {
+    "name": "美股",
+    "stocks": [
+      {"symbol": "AAPL", "name": "Apple", "sector": "科技"},
+      {"symbol": "MSFT", "name": "Microsoft", "sector": "科技"},
+      {"symbol": "NVDA", "name": "NVIDIA", "sector": "半導體"},
+      {"symbol": "GOOGL", "name": "Alphabet", "sector": "科技"},
+      {"symbol": "AMZN", "name": "Amazon", "sector": "科技"},
+      {"symbol": "META", "name": "Meta", "sector": "科技"},
+      {"symbol": "TSLA", "name": "Tesla", "sector": "汽車"},
+      {"symbol": "AMD", "name": "AMD", "sector": "半導體"},
+      {"symbol": "AVGO", "name": "Broadcom", "sector": "半導體"},
+      {"symbol": "ASML", "name": "ASML", "sector": "半導體"},
+      {"symbol": "JPM", "name": "JPMorgan Chase", "sector": "金融"},
+      {"symbol": "V", "name": "Visa", "sector": "金融"},
+      {"symbol": "WMT", "name": "Walmart", "sector": "零售"},
+      {"symbol": "JNJ", "name": "Johnson & Johnson", "sector": "醫療"},
+      {"symbol": "XOM", "name": "Exxon Mobil", "sector": "能源"}
+    ]
+  },
+  "TW": {
+    "name": "台股",
+    "stocks": [
+      {"symbol": "2330.TW", "name": "台積電", "sector": "半導體"},
+      {"symbol": "2454.TW", "name": "聯發科", "sector": "半導體"},
+      {"symbol": "2317.TW", "name": "鴻海", "sector": "電子"},
+      {"symbol": "0050.TW", "name": "元大台灣50", "sector": "ETF"},
+      {"symbol": "2412.TW", "name": "中華電", "sector": "通訊"},
+      {"symbol": "2881.TW", "name": "富邦金", "sector": "金融"},
+      {"symbol": "2882.TW", "name": "國泰金", "sector": "金融"},
+      {"symbol": "2308.TW", "name": "台達電", "sector": "電子"},
+      {"symbol": "3008.TW", "name": "大立光", "sector": "光學"},
+      {"symbol": "2603.TW", "name": "長榮", "sector": "航運"}
+    ]
+  }
+}

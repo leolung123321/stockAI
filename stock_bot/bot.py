@@ -12,6 +12,8 @@ from .stock_data import get_stock_data
 from .news_fetcher import get_recent_news
 from .sentiment import analyze_sentiment, parse_stock_symbol
 from .formatter import format_analysis, format_error, format_processing
+from .screener import run_screen, _parse_date_from_message
+from .screener_formatter import format_screener_report
 from .db import insert_log, init_db
 import yfinance as yf
 
@@ -57,6 +59,42 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+async def screener_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """處理 /screener [date] 指令。"""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or ""
+
+    target_date = None
+    if context.args:
+        raw = " ".join(context.args)
+        target_date = _parse_date_from_message(raw)
+        if target_date is None:
+            # 嘗試當作日期字串直接使用
+            target_date = raw.strip()
+
+    processing_msg = await update.message.reply_text("🔍 正在掃描龍頭股異動，請稍候...")
+
+    try:
+        result = await asyncio.to_thread(run_screen, target_date)
+        formatted = format_screener_report(result)
+        await processing_msg.edit_text(formatted)
+
+        # 寫入 DB
+        try:
+            await asyncio.to_thread(
+                insert_log, user_id, username,
+                "screener",
+                f"/screener {target_date or 'today'}",
+                formatted,
+                query_type="screener",
+            )
+        except Exception as e:
+            logger.warning(f"[DB] screener 寫入失敗: {e}")
+    except Exception as e:
+        logger.error(f"[screener] 執行失敗: {e}")
+        await processing_msg.edit_text(f"❌ 掃描失敗：{e}")
+
+
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """處理 /analyze <symbol> 指令。"""
     user_id = update.effective_user.id
@@ -90,6 +128,29 @@ async def natural_language_handler(update: Update, context: ContextTypes.DEFAULT
 
     # 傳送處理中訊息
     processing_msg = await update.message.reply_text("🔍 正在解析你的查詢...")
+
+    # ── 偵測「龍頭股」關鍵字 → 觸發篩選 ──
+    if "龍頭" in message_text or "龍頭股" in message_text:
+        target_date = _parse_date_from_message(message_text)
+        await processing_msg.edit_text("🔍 正在掃描龍頭股異動，請稍候...")
+        try:
+            result = await asyncio.to_thread(run_screen, target_date)
+            formatted = format_screener_report(result)
+            await processing_msg.edit_text(formatted)
+            try:
+                await asyncio.to_thread(
+                    insert_log, user_id, username,
+                    "screener",
+                    message_text,
+                    formatted,
+                    query_type="screener",
+                )
+            except Exception as e:
+                logger.warning(f"[DB] screener 寫入失敗: {e}")
+        except Exception as e:
+            logger.error(f"[screener] 執行失敗: {e}")
+            await processing_msg.edit_text(f"❌ 掃描失敗：{e}")
+        return
 
     # Step 1: 先用簡易規則快速匹配
     symbol = parse_stock_symbol_fast(message_text)
@@ -262,6 +323,7 @@ def run_bot(token: str) -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("analyze", analyze_command))
+    app.add_handler(CommandHandler("screener", screener_command))
 
     # 註冊自然語言處理器（非指令訊息）
     app.add_handler(
