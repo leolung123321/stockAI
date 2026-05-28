@@ -301,33 +301,36 @@ def api_chat():
     if not message:
         return jsonify({"type": "error", "result": "請輸入查詢內容"})
 
-    # ── 偵測龍頭股關鍵字 ──
+    # ── 偵測龍頭股關鍵字（僅當無額外技術條件時）──
     if "龍頭" in message or "龍頭股" in message:
-        target_date = _parse_date_from_message(message)
+        tech_keywords = ["九轉", "神奇九轉", "TD", "連升", "連跌", "大陽竹", "大陽燭", "大陰竹", "大陰燭", "RSI", "MACD", "超買", "超賣", "支持位", "阻力位"]
+        has_tech = any(kw in message for kw in tech_keywords)
+        if not has_tech:
+            target_date = _parse_date_from_message(message)
 
-        # 解析市場關鍵字（同 bot.py）
-        market = None
-        msg_lower = message.lower()
-        if "港" in msg_lower or "香港" in msg_lower:
-            market = "HK"
-        elif "美" in msg_lower or "美國" in msg_lower:
-            market = "US"
-        elif "台" in msg_lower or "台灣" in msg_lower or "臺灣" in msg_lower:
-            market = "TW"
+            # 解析市場關鍵字（同 bot.py）
+            market = None
+            msg_lower = message.lower()
+            if "港" in msg_lower or "香港" in msg_lower:
+                market = "HK"
+            elif "美" in msg_lower or "美國" in msg_lower:
+                market = "US"
+            elif "台" in msg_lower or "台灣" in msg_lower or "臺灣" in msg_lower:
+                market = "TW"
 
-        try:
-            result = run_screen(target_date, market)
-            html = format_screener_html(result)
-            md = format_screener_report(result)
-            insert_log(0, username, "screener", message, md, query_type="screener")
-            return jsonify({
-                "type": "screener",
-                "result": md,
-                "result_html": html,
-                "hits": len(result.get("hits", [])),
-            })
-        except Exception as e:
-            return jsonify({"type": "error", "result": f"掃描失敗：{e}"})
+            try:
+                result = run_screen(target_date, market)
+                html = format_screener_html(result)
+                md = format_screener_report(result)
+                insert_log(0, username, "screener", message, md, query_type="screener")
+                return jsonify({
+                    "type": "screener",
+                    "result": md,
+                    "result_html": html,
+                    "hits": len(result.get("hits", [])),
+                })
+            except Exception as e:
+                return jsonify({"type": "error", "result": f"掃描失敗：{e}"})
 
     # ── 先用規則匹配股票代號 ──
     symbol = parse_stock_symbol_fast(message)

@@ -515,78 +515,169 @@ async def _handle_candle_query(intent: dict) -> str:
         return f"❌ 查詢 {name} K 線失敗：{e}"
 
 
+def _calc_rsi(df, period: int = 14) -> Optional[float]:
+    """計算 RSI(14)。"""
+    if df is None or len(df) < period + 1:
+        return None
+    closes = df["Close"].dropna()
+    if len(closes) < period + 1:
+        return None
+    delta = closes.diff().dropna()
+    gains = delta.where(delta > 0, 0)
+    losses = -delta.where(delta < 0, 0)
+    avg_gain = gains.tail(period).mean()
+    avg_loss = losses.tail(period).mean()
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return float(100 - (100 / (1 + rs)))
+
+
 async def _handle_screener_query(intent: dict) -> str:
-    """處理龍頭股+技術條件篩選。先跑 run_screen 取所有龍頭股數據，再按條件過濾。"""
-    import pandas as pd
+    """處理龍頭股+技術條件篩選。有指定條件時直接掃描所有 watchlist 股票。"""
     from datetime import datetime
     from .stock_data import _calc_td_sequential
+    from .screener import _load_watchlist, _get_kline_for_date
 
     market = intent.get("market", None)
     condition = intent.get("condition", "")
     target_date = datetime.now().strftime("%Y-%m-%d")
 
-    # 跑 screener 取得所有龍頭股
-    result = await asyncio.to_thread(run_screen, target_date, market)
-    hits = result.get("hits", [])
-    total = result.get("total_scanned", 0)
+    # ── 無條件 → 維持原始行為（跑 run_screen 中大陽線）──
+    if not condition:
+        result = await asyncio.to_thread(run_screen, target_date, market)
+        hits = result.get("hits", [])
+        total = result.get("total_scanned", 0)
+        if not hits:
+            return f"📊 **龍頭股異動掃描 — {target_date}**\n🔍 掃描範圍：{total} 檔 | 符合條件：0 檔\n\n❌ 今日無龍頭股出現中大陽線異動。"
+        lines = [f"📊 **龍頭股異動掃描 — {target_date}**"]
+        lines.append(f"🔍 掃描範圍：{total} 檔 | 符合條件：{len(hits)} 檔")
+        for h in hits:
+            lines.append(f"\n**{h['name']} ({h['symbol']})**")
+            lines.append(f"   📈 漲幅：{h['change_pct']:+.2f}%")
+        return "\n".join(lines)
 
-    if not hits:
-        return f"📊 **龍頭股異動掃描 — {target_date}**\n🔍 掃描範圍：{total} 檔 | 符合條件：0 檔\n\n❌ 今日無龍頭股出現中大陽線異動。"
+    # ── 有技術條件 → 直接掃描所有 watchlist 股票 ──
+    watchlist = _load_watchlist()
+    if not watchlist:
+        return f"📊 **龍頭股異動掃描 — {target_date}**【已篩選】\n❌ 無法載入 watchlist"
 
-    # 從 hits 中檢查技術條件
+    if market:
+        market_upper = market.upper()
+        watchlist = {k: v for k, v in watchlist.items() if k == market_upper}
+        if not watchlist:
+            return f"📊 **龍頭股異動掃描 — {target_date}**【已篩選】\n🔍 掃描 0 檔\n\n❌ 未找到市場 {market_upper}"
+
+    # 收集所有股票
+    all_stocks = []
+    for market_code, market_data in watchlist.items():
+        for s in market_data.get("stocks", []):
+            s["market"] = market_data.get("name", market_code)
+            all_stocks.append(s)
+
+    import re
+    total = len(all_stocks)
     filtered = []
-    for h in hits:
-        symbol = h["symbol"]
-        name = h["name"]
+    errors = []
+    cond_lower = condition.lower()
 
-        # 取得完整 K 線資料來計算技術指標
-        df_raw, _, _ = await asyncio.to_thread(_get_kline_for_date, symbol, target_date, num=80)
-        if df_raw is None or df_raw.empty:
-            continue
-
-        # 檢查 TD Sequential
-        if "td_sequential" in condition:
-            td = _calc_td_sequential(df_raw)
-            if td is None:
+    for stock in all_stocks:
+        symbol = stock["symbol"]
+        name = stock.get("name", symbol)
+        try:
+            df_raw, atr, day_ohlc = await asyncio.to_thread(_get_kline_for_date, symbol, target_date, num=80)
+            if df_raw is None or df_raw.empty:
+                errors.append(name)
                 continue
-            # 用戶想要第九轉
-            target_td_count = 9
-            if "8" in condition:
-                target_td_count = 8
-            elif "7" in condition:
-                target_td_count = 7
-            elif "6" in condition:
-                target_td_count = 6
-            if td.get("count") == target_td_count:
-                filtered.append({
-                    "symbol": symbol,
-                    "name": name,
-                    "sector": h.get("sector", ""),
-                    "market": h.get("market", ""),
-                    "change_pct": h.get("change_pct", 0),
-                    "td": td,
-                })
-        else:
-            # 無特定條件時全部保留
-            filtered.append(h)
 
+            entry = {"symbol": symbol, "name": name, "sector": stock.get("sector", ""), "market": stock.get("market", "")}
+            matched = False
+
+            # ── TD Sequential（神奇九轉）──
+            if "td_sequential" in cond_lower or "九轉" in cond_lower:
+                td = _calc_td_sequential(df_raw)
+                if td:
+                    target_count = 9
+                    m = re.search(r'(?:td_sequential[:\s]*|第)(\d+)', condition)
+                    if m:
+                        target_count = int(m.group(1))
+                    if td.get("count") == target_count:
+                        entry["td"] = td
+                        matched = True
+
+            # ── 大陰竹 / 大陰燭（big bearish candle）──
+            elif any(kw in cond_lower for kw in ["bearish", "大陰竹", "大陰燭"]):
+                if day_ohlc and atr and atr > 0:
+                    o, c = day_ohlc["open"], day_ohlc["close"]
+                    body = o - c
+                    if body > 0 and body > atr * 1.0:
+                        entry["change_pct"] = round((c - o) / o * 100, 2)
+                        matched = True
+
+            # ── 超買（RSI >= 70）/ 超賣（RSI <= 30）──
+            elif any(kw in cond_lower for kw in ["overbought", "oversold", "超買", "超賣"]):
+                rsi = _calc_rsi(df_raw)
+                if rsi is not None:
+                    is_overbought = any(kw in cond_lower for kw in ["overbought", "超買"])
+                    if is_overbought and rsi >= 70:
+                        entry["rsi"] = round(rsi, 1)
+                        matched = True
+                    elif not is_overbought and rsi <= 30:
+                        entry["rsi"] = round(rsi, 1)
+                        matched = True
+
+            # ── 連升 / 連跌 ──
+            elif any(kw in cond_lower for kw in ["consecutive_up", "consecutive_down", "連升", "連跌"]):
+                closes = df_raw["Close"].dropna()
+                if len(closes) >= 5:
+                    n = 3
+                    m = re.search(r'(\d+)', condition)
+                    if m:
+                        n = int(m.group(1))
+                    is_up = any(kw in cond_lower for kw in ["consecutive_up", "連升"])
+                    count = 0
+                    for i in range(1, min(n + 1, len(closes))):
+                        if is_up and float(closes.iloc[-i]) > float(closes.iloc[-i - 1]):
+                            count += 1
+                        elif not is_up and float(closes.iloc[-i]) < float(closes.iloc[-i - 1]):
+                            count += 1
+                        else:
+                            break
+                    if count >= n:
+                        matched = True
+
+            if matched:
+                filtered.append(entry)
+
+        except Exception:
+            errors.append(name)
+
+    # ── 格式化結果 ──
     if not filtered:
-        return f"📊 **龍頭股異動掃描 — {target_date}**【已篩選】\n🔍 掃描範圍：{total} 檔 | 符合技術條件的股票：0 檔\n\n❌ 無龍頭股符合篩選條件。"
+        msg = f"📊 **龍頭股異動掃描 — {target_date}**【已篩選]\n🔍 掃描範圍：{total} 檔 | 符合條件：0 檔\n\n❌ 無龍頭股符合篩選條件。"
+        if errors:
+            msg += f"\n⚠️ {len(errors)} 檔數據獲取失敗"
+        return msg
 
-    # 格式化結果
-    lines = [f"📊 **龍頭股異動掃描 — {target_date}**【已篩選】"]
-    lines.append(f"🔍 掃描範圍：{total} 檔 | 符合篩選條件：{len(filtered)} 檔")
+    lines = [f"📊 **龍頭股異動掃描 — {target_date}**【已篩選]"]
+    lines.append(f"🔍 掃描範圍：{total} 檔 | 符合條件：{len(filtered)} 檔")
     lines.append("")
-
     for i, f in enumerate(filtered, 1):
         lines.append(f"**{i}. {f['name']} ({f['symbol']})** — [{f['market']}] {f['sector']}")
-        lines.append(f"   📈 當日漲幅：{f['change_pct']:+.2f}%")
         td = f.get("td")
         if td:
             lines.append(f"   🔄 {td['label']}")
             lines.append(f"   💡 {td['signal']}")
+        rsi = f.get("rsi")
+        if rsi is not None:
+            label = "超買" if rsi >= 70 else "超賣"
+            lines.append(f"   📊 RSI(14) = {rsi}（{label}）")
+        change_pct = f.get("change_pct")
+        if change_pct is not None:
+            lines.append(f"   📈 當日漲跌幅：{change_pct:+.2f}%")
         lines.append("")
-
+    if errors:
+        lines.append(f"⚠️ {len(errors)} 檔股票數據獲取失敗")
     return "\n".join(lines)
 
 
