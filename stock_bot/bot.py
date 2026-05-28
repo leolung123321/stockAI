@@ -10,10 +10,11 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 from .stock_data import get_stock_data
 from .news_fetcher import get_recent_news
-from .sentiment import analyze_sentiment, parse_stock_symbol
+from .sentiment import analyze_sentiment, parse_stock_symbol, _get_client
 from .formatter import format_analysis, format_error, format_processing
-from .screener import run_screen, _parse_date_from_message
+from .screener import run_screen, _parse_date_from_message, _get_kline_for_date, _is_big_bullish
 from .screener_formatter import format_screener_report
+from .web_search import search_tavily
 from .db import insert_log, init_db
 import yfinance as yf
 
@@ -22,6 +23,18 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ── 指數代號映射 ──
+INDEX_MAP = {
+    "恆生指數": "^HSI", "恆指": "^HSI", "恒生指數": "^HSI", "恒指": "^HSI",
+    "道瓊": "^DJI", "道指": "^DJI", "道瓊斯": "^DJI",
+    "納指": "^IXIC", "納斯達克": "^IXIC",
+    "標普": "^GSPC", "標普500": "^GSPC", "S&P": "^GSPC",
+    "日經": "^N225", "日經指數": "^N225",
+    "台股加權": "^TWII", "加權指數": "^TWII", "台指加權": "^TWII",
+    "上證": "^SSEC", "上證指數": "^SSEC",
+    "深證": "^SZSC", "深證指數": "^SZSC",
+}
 
 
 # ────────────────────────── 指令處理器 ──────────────────────────
@@ -129,98 +142,129 @@ async def natural_language_handler(update: Update, context: ContextTypes.DEFAULT
     # 傳送處理中訊息
     processing_msg = await update.message.reply_text("🔍 正在解析你的查詢...")
 
-    # ── 偵測「龍頭股」關鍵字 → 觸發篩選 ──
+    # ── 偵測「龍頭股」關鍵字 → 觸發篩選（僅當無額外技術條件時）──
     if "龍頭" in message_text or "龍頭股" in message_text:
-        target_date = _parse_date_from_message(message_text)
-        await processing_msg.edit_text("🔍 正在掃描龍頭股異動，請稍候...")
-        try:
-            result = await asyncio.to_thread(run_screen, target_date)
-            formatted = format_screener_report(result)
-            await processing_msg.edit_text(formatted)
+        # 若包含技術條件關鍵字，不走 screener，改走意圖分類
+        tech_keywords = ["九轉", "神奇九轉", "TD", "連升", "連跌", "大陽竹", "大陽燭", "大陰竹", "大陰燭", "RSI", "MACD", "超買", "超賣", "支持位", "阻力位"]
+        has_tech = any(kw in message_text for kw in tech_keywords)
+
+        if not has_tech:
+            target_date = _parse_date_from_message(message_text)
+
+            # 解析市場關鍵字
+            market = None
+            msg_lower = message_text.lower()
+            if "港" in msg_lower or "香港" in msg_lower:
+                market = "HK"
+            elif "美" in msg_lower or "美國" in msg_lower:
+                market = "US"
+            elif "台" in msg_lower or "台灣" in msg_lower or "臺灣" in msg_lower:
+                market = "TW"
+
+            market_label = {"HK": "港股", "US": "美股", "TW": "台股"}.get(market, "全部市場")
+            await processing_msg.edit_text(f"🔍 正在掃描{market_label}龍頭股異動，請稍候...")
             try:
-                await asyncio.to_thread(
-                    insert_log, user_id, username,
-                    "screener",
-                    message_text,
-                    formatted,
-                    query_type="screener",
-                )
+                result = await asyncio.to_thread(run_screen, target_date, market)
+                formatted = format_screener_report(result)
+                await processing_msg.edit_text(formatted)
+                try:
+                    await asyncio.to_thread(
+                        insert_log, user_id, username,
+                        "screener",
+                        message_text,
+                        formatted,
+                        query_type="screener",
+                    )
+                except Exception as e:
+                    logger.warning(f"[DB] screener 寫入失敗: {e}")
             except Exception as e:
-                logger.warning(f"[DB] screener 寫入失敗: {e}")
-        except Exception as e:
-            logger.error(f"[screener] 執行失敗: {e}")
-            await processing_msg.edit_text(f"❌ 掃描失敗：{e}")
-        return
+                logger.error(f"[screener] 執行失敗: {e}")
+                await processing_msg.edit_text(f"❌ 掃描失敗：{e}")
+            return
+        # 有技術條件 → 繼續往下走意圖分類
 
     # Step 1: 先用簡易規則快速匹配
     symbol = parse_stock_symbol_fast(message_text)
 
-    if symbol is None:
-        # Step 2: 使用 LLM 解析
-        await processing_msg.edit_text("🤖 正在用 AI 解析股票代號，請稍候...")
-        symbol = await asyncio.to_thread(parse_stock_symbol, message_text)
-
-    if symbol is None:
-        await processing_msg.edit_text(
-            "❓ 抱歉，我無法從你的訊息中辨識出股票代號。\n\n"
-            "請直接輸入股票代號，例如：\n"
-            "• 0700.HK（騰訊）\n"
-            "• AAPL（蘋果）\n"
-            "• 2330.TW（台積電）\n\n"
-            "或使用 /analyze <代號> 指令。"
-        )
+    # Step 2: 若匹配到代號 → 直接分析
+    if symbol is not None:
+        logger.info(f"[NL] 解析結果: symbol={symbol}")
+        await processing_msg.edit_text(format_processing(symbol))
+        result = await run_analysis(symbol, user_id, username, message_text)
+        await processing_msg.edit_text(result)
         return
 
-    logger.info(f"[NL] 解析結果: symbol={symbol}")
+    # Step 3: 無代號 → LLM 分類意圖
+    await processing_msg.edit_text("🤖 正在分析你的問題，請稍候...")
+    intent = await asyncio.to_thread(_classify_intent, message_text)
 
-    # 更新處理中訊息
-    await processing_msg.edit_text(format_processing(symbol))
+    if intent is None:
+        # LLM 分類失敗，fallback 到股票代號解析
+        await processing_msg.edit_text("🤖 正在用 AI 解析股票代號，請稍候...")
+        symbol = await asyncio.to_thread(parse_stock_symbol, message_text)
+        if symbol is None:
+            await processing_msg.edit_text(
+                "❓ 抱歉，我無法從你的訊息中辨識出股票代號。\n\n"
+                "請直接輸入股票代號，例如：\n"
+                "• 0700.HK（騰訊）\n"
+                "• AAPL（蘋果）\n"
+                "• 2330.TW（台積電）\n\n"
+                "或使用 /analyze <代號> 指令。"
+            )
+            return
+        logger.info(f"[NL] 解析結果: symbol={symbol}")
+        await processing_msg.edit_text(format_processing(symbol))
+        result = await run_analysis(symbol, user_id, username, message_text)
+        await processing_msg.edit_text(result)
+        return
 
-    result = await run_analysis(symbol, user_id, username, message_text)
+    # 根據意圖分流
+    if intent["type"] == "analysis":
+        symbol = intent.get("symbol", "")
+        if not symbol:
+            result = "❌ 無法識別股票代號。"
+        else:
+            await processing_msg.edit_text(format_processing(symbol))
+            result = await run_analysis(symbol, user_id, username, message_text)
+    elif intent["type"] == "index":
+        result = await _handle_index_query(intent)
+    elif intent["type"] == "candle":
+        await processing_msg.edit_text(f"🔍 正在檢視 {intent.get('name', intent['symbol'])} 的K線走勢...")
+        result = await _handle_candle_query(intent)
+    elif intent["type"] == "screener":
+        await processing_msg.edit_text("🔍 正在掃描龍頭股並篩選技術條件...")
+        result = await _handle_screener_query(intent)
+    elif intent["type"] == "general":
+        await processing_msg.edit_text("🌐 正在搜索相關資訊，請稍候...")
+        result = await _handle_general_question(intent, message_text)
+    else:
+        result = "❓ 抱歉，無法理解你的查詢。"
+
     await processing_msg.edit_text(result)
+
+    # 寫入 DB log
+    try:
+        await asyncio.to_thread(
+            insert_log, user_id, username,
+            intent.get("type", "unknown"),
+            message_text,
+            result[:500],
+        )
+    except Exception as e:
+        logger.warning(f"[DB] 寫入記錄失敗: {e}")
 
 
 def parse_stock_symbol_fast(message: str) -> Optional[str]:
-    """快速解析：先用正則匹配已知格式，再用中文名稱映射（免 LLM 延遲）。"""
+    """快速解析：只用正則匹配已知代號格式，不做中文名映射（交給 LLM 意圖分類處理）。"""
     import re
 
     msg_upper = message.upper()
 
-    # 匹配股票代號格式
+    # 匹配股票代號格式：美股字母 / 港股台股數字+後綴
     pattern = r'\b([A-Z]{1,5}(?:\.[A-Z]{2,3})?|\d{4}\.[A-Z]{2,3})\b'
     matches = re.findall(pattern, msg_upper)
     if matches:
         return matches[0]
-
-    # 中文名稱映射
-    name_map = {
-        "騰訊": "0700.HK",
-        "阿里巴巴": "9988.HK", "阿里": "9988.HK",
-        "美團": "3690.HK",
-        "小米": "1810.HK",
-        "快手": "1024.HK",
-        "京東": "9618.HK",
-        "網易": "9999.HK",
-        "百度": "9888.HK",
-        "比亞迪": "1211.HK",
-        "匯豐": "0005.HK",
-        "中移動": "0941.HK",
-        "平安": "2318.HK",
-        "友邦": "1299.HK",
-        "港交所": "0388.HK",
-        "中芯國際": "0981.HK", "中芯": "0981.HK",
-        "蘋果": "AAPL",
-        "微軟": "MSFT",
-        "谷歌": "GOOGL",
-        "特斯拉": "TSLA",
-        "輝達": "NVDA", "英偉達": "NVDA",
-        "亞馬遜": "AMZN",
-        "台積電": "2330.TW",
-        "台指": "0050.TW",
-    }
-    for name, code in name_map.items():
-        if name in message:
-            return code
 
     return None
 
@@ -269,6 +313,342 @@ async def run_analysis(
         logger.warning(f"[DB] 寫入記錄失敗: {e}")
 
     return result
+
+
+# ────────────────────────── 意圖分類與通用查詢處理 ──────────────────────────
+
+def _classify_intent(message: str) -> Optional[dict]:
+    """
+    使用 LLM 分類用戶查詢意圖。
+
+    Returns:
+        dict with keys:
+          {"type": "analysis", "symbol": "0700.HK", "name": "騰訊"}
+          {"type": "index", "symbol": "^HSI", "name": "恆生指數"}
+          {"type": "candle", "symbol": "0700.HK", "name": "騰訊"}
+          {"type": "general", "query": "..."}
+        None 若分類失敗
+    """
+    import os, json
+    api_key = os.getenv("LLM_API_KEY", "")
+    if not api_key:
+        return {"type": "general", "query": message}
+
+    # 先試 INDEX_MAP 快速匹配
+    for idx_name, yf_symbol in INDEX_MAP.items():
+        if idx_name in message:
+            return {"type": "index", "symbol": yf_symbol, "name": idx_name}
+
+    prompt = f"""你是一個股票查詢意圖分類器。請分析以下用戶訊息，判斷屬於哪一類：
+
+1. **analysis** — 查詢個股行情/技術分析（如「騰訊股價」、「蘋果股票怎麼了」、「TSLA睇下」、「幫我分析美團」）
+2. **candle** — 查詢個股K線形態/大陽竹大陰竹（如「騰訊有無大陽竹」、「0700有無大陰竹」、「美團今日K線點樣」）
+3. **index** — 查詢指數/大市行情（如恆生指數、道指、納指、上證等）
+4. **screener** — 在龍頭股中按技術條件篩選（如「處於神奇九轉第九轉的港股龍頭股」、「連升5日的龍頭股」）
+5. **general** — 其他一般財經問題（如「美國加息最新消息」、「今日金價」、「比特幣點睇」）
+
+用戶訊息：「{message}」
+
+請回覆 JSON（只回 JSON，不要其他文字）：
+- 若是 analysis 類型：{{"type": "analysis", "symbol": "<股票代號>", "name": "<股票中文名>"}}
+- 若是 candle 類型：{{"type": "candle", "symbol": "<股票代號>", "name": "<股票中文名>"}}
+- 若是 index 類型：{{"type": "index", "symbol": "<yfinance指數代號>", "name": "<中文名稱>"}}
+  常見指數：恆生指數→^HSI, 道瓊→^DJI, 納指→^IXIC, 標普→^GSPC, 日經→^N225, 上證→^SSEC, 台股加權→^TWII
+- 若是 screener 類型：{{"type": "screener", "market": "<HK|US|TW|null>", "condition": "<技術條件描述>"}}
+  例如「處於神奇九轉第九轉的港股龍頭股」→ {{"type": "screener", "market": "HK", "condition": "td_sequential:9"}}
+- 若是 general 類型：{{"type": "general"}}
+
+常見股票中英對照：
+- 騰訊=0700.HK, 阿里巴巴=9988.HK, 美團=3690.HK, 小米=1810.HK, 比亞迪=1211.HK
+- 蘋果=AAPL, 微軟=MSFT, 谷歌=GOOGL, 特斯拉=TSLA, 輝達=NVDA, 亞馬遜=AMZN, Meta=META
+- 台積電=2330.TW, 聯發科=2454.TW
+"""
+    try:
+        client = _get_client()
+        resp = client.chat.completions.create(
+            model=os.getenv("LLM_MODEL", "deepseek-chat"),
+            messages=[
+                {"role": "system", "content": "你是一個股票查詢分類器，只回 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=100,
+        )
+        content = resp.choices[0].message.content.strip()
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+        intent = json.loads(content)
+        if intent.get("type") in ("analysis", "index", "candle", "screener", "general"):
+            return intent
+        return {"type": "general", "query": message}
+    except Exception as e:
+        print(f"[bot] 意圖分類失敗: {e}")
+        return {"type": "general", "query": message}
+
+
+async def _handle_index_query(intent: dict) -> str:
+    """處理指數查詢。"""
+    symbol = intent.get("symbol", "^HSI")
+    name = intent.get("name", symbol)
+
+    try:
+        ticker = await asyncio.to_thread(lambda: yf.Ticker(symbol))
+        hist = await asyncio.to_thread(lambda: ticker.history(period="5d"))
+        info = await asyncio.to_thread(lambda: ticker.info or {})
+
+        if hist is None or hist.empty:
+            return f"❌ 無法獲取 {name} 的數據"
+
+        latest = hist.iloc[-1]
+        close = latest["Close"]
+        prev_close = hist.iloc[-2]["Close"] if len(hist) >= 2 else close
+        change = close - prev_close
+        change_pct = (change / prev_close) * 100 if prev_close > 0 else 0
+        high = latest["High"]
+        low = latest["Low"]
+
+        lines = [f"📊 **{name}**"]
+        lines.append(f"   現價：{close:.2f}")
+        if change >= 0:
+            lines.append(f"   升跌：**+{change:.2f} (+{change_pct:.2f}%)** 📈")
+        else:
+            lines.append(f"   升跌：**{change:.2f} ({change_pct:.2f}%)** 📉")
+        lines.append(f"   最高：{high:.2f} / 最低：{low:.2f}")
+        lines.append(f"   前收市：{prev_close:.2f}")
+
+        # 從 info 補充
+        if info:
+            name_cn = info.get("shortName") or info.get("longName") or name
+            lines[0] = f"📊 **{name_cn}**"
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error(f"[index] {name} 查詢失敗: {e}")
+        return f"❌ 查詢 {name} 失敗：{e}"
+
+
+async def _handle_candle_query(intent: dict) -> str:
+    """處理大陽竹/大陰竹查詢。"""
+    symbol = intent.get("symbol", "")
+    name = intent.get("name", symbol)
+
+    if not symbol:
+        return "❌ 無法識別股票代號"
+
+    try:
+        # 取近 20 個交易日的 K 線
+        import pandas as pd
+        from datetime import datetime, timedelta
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        df_raw, atr, _ = await asyncio.to_thread(_get_kline_for_date, symbol, today, num=80)
+
+        if df_raw is None or df_raw.empty:
+            return f"❌ 無法獲取 {name} ({symbol}) 的 K 線數據"
+
+        # 取倒數 20 根
+        df = df_raw.tail(20).copy()
+        if hasattr(df.index, "tz") and df.index.tz is not None:
+            df.index = df.index.tz_convert(None)
+        df.index = pd.to_datetime(df.index).normalize()
+
+        lines = [f"🕯 **{name} ({symbol}) — 近 20 個交易日 K 線分析**"]
+        lines.append("")
+
+        bullish_count = 0
+        bearish_count = 0
+        details = []
+
+        for idx in reversed(df.index):
+            row = df.loc[idx]
+            o, h, l, c = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
+            body = c - o
+            upper_wick = h - max(o, c)
+            lower_wick = min(o, c) - l
+            change_pct = (c - o) / o * 100 if o > 0 else 0
+            date_str = idx.strftime("%m/%d")
+
+            # 判斷陰陽
+            if body > 0:
+                is_bullish = _is_big_bullish(o, c, atr)
+                if is_bullish:
+                    bullish_count += 1
+                    details.append(f"   {date_str} **大陽竹** 🟢 +{change_pct:.1f}% (體${body:.2f})")
+                else:
+                    # 一般陽線
+                    pass
+            elif body < 0:
+                body_abs = abs(body)
+                # 大陰竹：實體 > ATR 或 跌幅 > 3%
+                if atr and atr > 0 and body_abs > atr * 1.0:
+                    bearish_count += 1
+                    details.append(f"   {date_str} **大陰竹** 🔴 {change_pct:.1f}% (體${body_abs:.2f})")
+                elif abs(change_pct) >= 3.0:
+                    bearish_count += 1
+                    details.append(f"   {date_str} **大陰竹** 🔴 {change_pct:.1f}%")
+
+        lines.append(f"   ATR(14) = ${atr:.2f}" if atr else "")
+        lines.append(f"   大陽竹出現：{bullish_count} 次")
+        lines.append(f"   大陰竹出現：{bearish_count} 次")
+        lines.append("")
+
+        if details:
+            lines.append("   **顯著K線**：")
+            for d in details[:10]:
+                lines.append(d)
+        else:
+            lines.append("   近 20 日無明顯大陽竹或大陰竹。")
+
+        lines.append("")
+        lines.append("⚠️ 大陽竹定義：實體 > ATR 或漲幅 >= 3%；大陰竹反之。")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error(f"[candle] {name} 查詢失敗: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"❌ 查詢 {name} K 線失敗：{e}"
+
+
+async def _handle_screener_query(intent: dict) -> str:
+    """處理龍頭股+技術條件篩選。先跑 run_screen 取所有龍頭股數據，再按條件過濾。"""
+    import pandas as pd
+    from datetime import datetime
+    from .stock_data import _calc_td_sequential
+
+    market = intent.get("market", None)
+    condition = intent.get("condition", "")
+    target_date = datetime.now().strftime("%Y-%m-%d")
+
+    # 跑 screener 取得所有龍頭股
+    result = await asyncio.to_thread(run_screen, target_date, market)
+    hits = result.get("hits", [])
+    total = result.get("total_scanned", 0)
+
+    if not hits:
+        return f"📊 **龍頭股異動掃描 — {target_date}**\n🔍 掃描範圍：{total} 檔 | 符合條件：0 檔\n\n❌ 今日無龍頭股出現中大陽線異動。"
+
+    # 從 hits 中檢查技術條件
+    filtered = []
+    for h in hits:
+        symbol = h["symbol"]
+        name = h["name"]
+
+        # 取得完整 K 線資料來計算技術指標
+        df_raw, _, _ = await asyncio.to_thread(_get_kline_for_date, symbol, target_date, num=80)
+        if df_raw is None or df_raw.empty:
+            continue
+
+        # 檢查 TD Sequential
+        if "td_sequential" in condition:
+            td = _calc_td_sequential(df_raw)
+            if td is None:
+                continue
+            # 用戶想要第九轉
+            target_td_count = 9
+            if "8" in condition:
+                target_td_count = 8
+            elif "7" in condition:
+                target_td_count = 7
+            elif "6" in condition:
+                target_td_count = 6
+            if td.get("count") == target_td_count:
+                filtered.append({
+                    "symbol": symbol,
+                    "name": name,
+                    "sector": h.get("sector", ""),
+                    "market": h.get("market", ""),
+                    "change_pct": h.get("change_pct", 0),
+                    "td": td,
+                })
+        else:
+            # 無特定條件時全部保留
+            filtered.append(h)
+
+    if not filtered:
+        return f"📊 **龍頭股異動掃描 — {target_date}**【已篩選】\n🔍 掃描範圍：{total} 檔 | 符合技術條件的股票：0 檔\n\n❌ 無龍頭股符合篩選條件。"
+
+    # 格式化結果
+    lines = [f"📊 **龍頭股異動掃描 — {target_date}**【已篩選】"]
+    lines.append(f"🔍 掃描範圍：{total} 檔 | 符合篩選條件：{len(filtered)} 檔")
+    lines.append("")
+
+    for i, f in enumerate(filtered, 1):
+        lines.append(f"**{i}. {f['name']} ({f['symbol']})** — [{f['market']}] {f['sector']}")
+        lines.append(f"   📈 當日漲幅：{f['change_pct']:+.2f}%")
+        td = f.get("td")
+        if td:
+            lines.append(f"   🔄 {td['label']}")
+            lines.append(f"   💡 {td['signal']}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+async def _handle_general_question(intent: dict, original_message: str) -> str:
+    """處理一般問題：Tavily 搜索 + LLM 摘要。"""
+    query = intent.get("query", original_message)
+
+    # Tavily 搜索
+    search_results = await asyncio.to_thread(search_tavily, query, 5)
+
+    if not search_results:
+        return "❌ 無法搜索到相關資訊，請稍後再試或換個問法。"
+
+    # 用 LLM 摘要搜索結果
+    import os, json
+
+    api_key = os.getenv("LLM_API_KEY", "")
+    if not api_key:
+        # 無 LLM 時直接顯示搜尋結果
+        lines = ["🌐 **搜索結果**", ""]
+        for r in search_results[:3]:
+            lines.append(f"🔹 {r['title']}")
+            lines.append(f"   {r['content'][:100]}...")
+            lines.append("")
+        return "\n".join(lines)
+
+    joined = "\n".join([f"{i+1}. {r['title']}\n   {r['content'][:300]}" for i, r in enumerate(search_results[:5])])
+
+    prompt = f"""以下是用戶問題和網絡搜索結果，請用繁體中文回答。
+
+用戶問題：{query}
+
+搜索結果：
+{joined}
+
+請根據搜索結果，用繁體中文簡潔回答（100-200字）。如搜索結果不足以回答，請誠實說明。"""
+
+    try:
+        client = _get_client()
+        resp = client.chat.completions.create(
+            model=os.getenv("LLM_MODEL", "deepseek-chat"),
+            messages=[
+                {"role": "system", "content": "你是一個專業的財經助手，用繁體中文回答。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=500,
+        )
+        answer = resp.choices[0].message.content.strip()
+
+        # 附上來源
+        sources = "\n".join([f"🔗 {r['url']}" for r in search_results[:3]])
+        return f"🌐 **{answer}**\n\n{sources}"
+
+    except Exception as e:
+        print(f"[general] LLM 摘要失敗: {e}")
+        lines = ["🌐 **搜索結果**", ""]
+        for r in search_results[:3]:
+            lines.append(f"🔹 {r['title']}")
+            lines.append(f"   {r['content'][:150]}...")
+            lines.append("")
+        return "\n".join(lines)
 
 
 # ────────────────────────── Bot 啟動 ──────────────────────────

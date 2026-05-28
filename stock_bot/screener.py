@@ -323,12 +323,13 @@ def _parse_date_from_message(message: str) -> Optional[str]:
     return None
 
 
-def run_screen(target_date: Optional[str] = None) -> Dict[str, Any]:
+def run_screen(target_date: Optional[str] = None, market: Optional[str] = None) -> Dict[str, Any]:
     """
     執行龍頭股異動篩選。
 
     Args:
         target_date: 目標日期 YYYY-MM-DD，None 為當天
+        market: 指定市場代碼（HK/US/TW），None 為掃描全部
 
     Returns:
         dict: {
@@ -346,6 +347,13 @@ def run_screen(target_date: Optional[str] = None) -> Dict[str, Any]:
     watchlist = _load_watchlist()
     if not watchlist:
         return {"date": target_date, "total_scanned": 0, "hits": [], "errors": ["無法載入 watchlist"]}
+
+    # 若指定市場，只保留該市場
+    if market:
+        market_upper = market.upper()
+        watchlist = {k: v for k, v in watchlist.items() if k == market_upper}
+        if not watchlist:
+            return {"date": target_date, "total_scanned": 0, "hits": [], "errors": [f"未找到市場 {market_upper}"]}
 
     # 收集所有股票
     all_stocks: List[Dict[str, str]] = []

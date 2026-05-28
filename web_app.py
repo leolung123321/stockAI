@@ -8,7 +8,8 @@ from flask import Flask, request, jsonify
 from stock_bot.db import query_logs, get_log_count, init_db, insert_log
 from stock_bot.screener import run_screen, _parse_date_from_message
 from stock_bot.screener_formatter import format_screener_html, format_screener_report
-from stock_bot.bot import run_analysis, parse_stock_symbol_fast
+from stock_bot.bot import run_analysis, parse_stock_symbol_fast, _classify_intent
+from stock_bot.bot import _handle_index_query, _handle_candle_query, _handle_screener_query, _handle_general_question
 from stock_bot.sentiment import parse_stock_symbol
 
 app = Flask(__name__)
@@ -303,8 +304,19 @@ def api_chat():
     # ── 偵測龍頭股關鍵字 ──
     if "龍頭" in message or "龍頭股" in message:
         target_date = _parse_date_from_message(message)
+
+        # 解析市場關鍵字（同 bot.py）
+        market = None
+        msg_lower = message.lower()
+        if "港" in msg_lower or "香港" in msg_lower:
+            market = "HK"
+        elif "美" in msg_lower or "美國" in msg_lower:
+            market = "US"
+        elif "台" in msg_lower or "台灣" in msg_lower or "臺灣" in msg_lower:
+            market = "TW"
+
         try:
-            result = run_screen(target_date)
+            result = run_screen(target_date, market)
             html = format_screener_html(result)
             md = format_screener_report(result)
             insert_log(0, username, "screener", message, md, query_type="screener")
@@ -317,32 +329,88 @@ def api_chat():
         except Exception as e:
             return jsonify({"type": "error", "result": f"掃描失敗：{e}"})
 
-    # ── 一般股票分析 ──
+    # ── 先用規則匹配股票代號 ──
     symbol = parse_stock_symbol_fast(message)
-    if symbol is None:
+
+    # ── 匹配到代號 → 直接分析 ──
+    if symbol is not None:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result_text = loop.run_until_complete(run_analysis(symbol, 0, username, message))
+            finally:
+                loop.close()
+            return jsonify({"type": "analysis", "symbol": symbol, "result": result_text})
+        except Exception as e:
+            return jsonify({"type": "error", "result": f"分析失敗：{e}"})
+
+    # ── 無代號 → 意圖分類 ──
+    try:
+        intent = _classify_intent(message)
+    except Exception:
+        intent = {"type": "general", "query": message}
+
+    if intent is None:
+        # fallback 到 LLM 解析代號
         try:
             symbol = parse_stock_symbol(message)
         except Exception:
             symbol = None
-
-    if symbol is None:
+        if symbol:
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result_text = loop.run_until_complete(run_analysis(symbol, 0, username, message))
+                finally:
+                    loop.close()
+                return jsonify({"type": "analysis", "symbol": symbol, "result": result_text})
+            except Exception as e:
+                return jsonify({"type": "error", "result": f"分析失敗：{e}"})
         return jsonify({
             "type": "error",
             "result": "❌ 無法辨識股票代號。請輸入代號（如 0700.HK、AAPL）或中文名稱。"
         })
 
+    # 根據意圖分流
     try:
-        # 同步執行分析（使用 asyncio.run 在同步上下文中跑）
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            result_text = loop.run_until_complete(run_analysis(symbol, 0, username, message))
-        finally:
-            loop.close()
+        _run_event_loop = lambda coro: asyncio.run(coro) if hasattr(asyncio, 'run') else asyncio.new_event_loop().run_until_complete(coro)
+        # 簡化：用 helper 統一處理 async
+        def _sync_run(coro):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
 
-        return jsonify({"type": "analysis", "symbol": symbol, "result": result_text})
+        if intent["type"] == "analysis":
+            symbol = intent.get("symbol", "")
+            if not symbol:
+                result_text = "❌ 無法識別股票代號。"
+            else:
+                result_text = _sync_run(run_analysis(symbol, 0, username, message))
+        elif intent["type"] == "index":
+            result_text = _sync_run(_handle_index_query(intent))
+        elif intent["type"] == "candle":
+            result_text = _sync_run(_handle_candle_query(intent))
+        elif intent["type"] == "screener":
+            result_text = _sync_run(_handle_screener_query(intent))
+        elif intent["type"] == "general":
+            result_text = _sync_run(_handle_general_question(intent, message))
+        else:
+            result_text = "❓ 抱歉，無法理解你的查詢。"
+
+        # 寫入 DB
+        try:
+            insert_log(0, username, intent.get("type", "unknown"), message, result_text[:500])
+        except Exception:
+            pass
+
+        return jsonify({"type": intent.get("type", "general"), "result": result_text})
     except Exception as e:
-        return jsonify({"type": "error", "result": f"分析失敗：{e}"})
+        return jsonify({"type": "error", "result": f"處理失敗：{e}"})
 
 
 def run_web(host: str = "127.0.0.1", port: int = 5000, open_browser: bool = True) -> None:
